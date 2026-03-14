@@ -9,24 +9,19 @@ from sklearn.model_selection import train_test_split
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 
-# Opcional: para graficar los datos en 2D y 3D
 import matplotlib
-# Configuramos backend para ventanas interactivas (TkAgg funciona en la mayoría de sistemas)
 try:
     matplotlib.use("TkAgg")
 except Exception:
     try:
         matplotlib.use("Qt5Agg")
     except Exception:
-        pass  # Usa el backend por defecto
+        pass
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401, necesario para activar 3D en matplotlib
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
-# Activamos modo interactivo para que las ventanas no bloqueen el juego
 plt.ion()
 
-
-# Ventana base y factor de escala
 BASE_W, BASE_H = 1080, 720
 WINDOW_FRACTION = 0.97
 EXTRA_SCALE = 1.1
@@ -36,51 +31,60 @@ EXTRA_SCALE = 1.1
 class Sample:
     velocidad_bala: float
     distancia: float
-    salto: int  # 1 si saltó EN ESE FRAME, 0 si no
+    # ---------------------------------------------------------------------------
+    # La etiqueta tiene 3 valores posibles:
+    #   0 = no hacer nada (pararse normal)
+    #   1 = saltar
+    #   2 = agacharse
+    # ---------------------------------------------------------------------------
+    salto: int
+    # ---------------------------------------------------------------------------
+    # NUEVO: altura de la bala en este disparo.
+    #   0 = bala baja  → hay que SALTAR para esquivarla
+    #   1 = bala alta  → hay que AGACHARSE para esquivarla
+    # Se incluye como feature extra para que el modelo pueda distinguir
+    # qué acción tomar según la trayectoria de la bala actual.
+    # ---------------------------------------------------------------------------
+    altura_bala: int
 
 
 class Juego:
     def __init__(self) -> None:
         pygame.init()
 
-        # Ventana fija (sin redimensionamiento automático) para evitar
-        # problemas en pantallas muy grandes / 2K / 4K.
         self._flags = 0
         self._fullscreen = False
 
-        # Tamaño fijo de ventana
         start_w = BASE_W
         start_h = BASE_H
         self.pantalla = pygame.display.set_mode((start_w, start_h), self._flags)
-        pygame.display.set_caption("Juego: Bala + salto + MLP (solo memoria)")
+        pygame.display.set_caption("Juego: Bala + salto + agacharse + MLP")
 
-        # Colores
         self.BLANCO = (255, 255, 255)
         self.NEGRO = (0, 0, 0)
         self.GRIS = (200, 200, 200)
         self.AMARILLO = (255, 220, 120)
 
-        # Estado global
         self.corriendo = True
         self.modo_auto = False
 
-        # Datos / modelo
         self.datos_modelo: List[Sample] = []
         self.modelo: Optional[MLPClassifier] = None
         self.scaler: Optional[StandardScaler] = None
         self.modelo_entrenado = False
-        # Caso especial: cuando solo hay una clase en los datos
-        # (0 = nunca salto, 1 = siempre salto).
         self.clase_unica: Optional[int] = None
-        # Debug / info del modelo en tiempo real
         self.ultima_proba_salto: Optional[float] = None
 
-        # Parámetros de decisión
+        # -----------------------------------------------------------------------
+        # NUEVO: variable para rastrear la última predicción del modo auto.
+        # Nos dice si el modelo decidió: 0=quieto, 1=saltar, 2=agacharse.
+        # -----------------------------------------------------------------------
+        self.ultima_accion_auto: Optional[int] = None
+
         self.decision_window = 500
         self.decision_record_every = 3
         self._decision_frame_counter = 0
 
-        # Geometría / física (se rellenan en _apply_resolution)
         self.w, self.h = start_w, start_h
         self.scale = 1.0
         self.margin = 50
@@ -88,7 +92,6 @@ class Juego:
         self.player_size = (32, 48)
         self.bullet_size = (16, 16)
         self.ship_size = (64, 64)
-        # Velocidad de desplazamiento del fondo
         self.fondo_speed = 3
 
         self.salto = False
@@ -97,15 +100,35 @@ class Juego:
         self.gravedad = 1.0
         self.salto_vel = self.salto_vel_inicial
 
+        # -----------------------------------------------------------------------
+        # NUEVO: estado de agacharse.
+        # agachado = True mientras el jugador mantiene presionada la tecla ABAJO.
+        # -----------------------------------------------------------------------
+        self.agachado = False
+
+        # -----------------------------------------------------------------------
+        # NUEVO: altura del jugador cuando está de pie y cuando está agachado.
+        # Al agacharse la hitbox baja a la mitad para poder esquivar balas altas.
+        # -----------------------------------------------------------------------
+        self.player_height_normal = 48   # altura en píxeles (base, se escala)
+        self.player_height_agachado = 24  # mitad de la altura normal
+
         self.current_frame = 0
         self.frame_speed = 10
         self.frame_count = 0
 
-        # Velocidad base de la bala (en píxeles/frame, negativa porque va de der→izq)
         self.velocidad_bala = -12
         self.bala_disparada = False
         self.fondo_x1 = 0
         self.fondo_x2 = start_w
+
+        # -----------------------------------------------------------------------
+        # NUEVO: tipo de altura del disparo actual.
+        #   0 = bala baja  (viaja al nivel de los pies → hay que saltar)
+        #   1 = bala alta  (viaja al nivel del torso  → hay que agacharse)
+        # Se sortea aleatoriamente en cada disparo dentro de disparar_bala().
+        # -----------------------------------------------------------------------
+        self.bala_altura_tipo: int = 0
 
         self._apply_resolution(start_w, start_h, reset_positions=True)
         self._reset_estado_juego()
@@ -130,6 +153,12 @@ class Juego:
         self.gravedad = 1 * self.scale
         self.salto_vel = self.salto_vel_inicial
 
+        # -----------------------------------------------------------------------
+        # NUEVO: recalculamos las alturas del jugador según la escala actual.
+        # -----------------------------------------------------------------------
+        self.player_height_normal = int(48 * self.scale)
+        self.player_height_agachado = int(24 * self.scale)  # mitad de la normal
+
         self.decision_window = int(500 * self.scale)
 
         self.fuente = pygame.font.SysFont("Arial", int(24 * self.scale))
@@ -138,10 +167,13 @@ class Juego:
         self._cargar_assets()
 
         if reset_positions or not hasattr(self, "jugador"):
-            self.jugador = pygame.Rect(self.margin, self.ground_y, self.player_size[0], self.player_size[1])
+            self.jugador = pygame.Rect(
+                self.margin, self.ground_y,
+                self.player_size[0], self.player_size[1]
+            )
             self.bala = pygame.Rect(
                 self.w - self.margin,
-                self.ground_y + int(10 * self.scale),
+                self.ground_y - self.player_height_normal // 2,
                 self.bullet_size[0],
                 self.bullet_size[1],
             )
@@ -169,6 +201,14 @@ class Juego:
             safe_load(os.path.join(base, "assets/sprites/mono_frame_3.png"), self.player_size),
             safe_load(os.path.join(base, "assets/sprites/mono_frame_4.png"), self.player_size),
         ]
+
+        agachado_size = (self.player_size[0], self.player_height_agachado)
+        self.jugador_agachado_img = safe_load(
+            os.path.join(base, "assets/sprites/mono_agachado.png"),
+            agachado_size,
+            (180, 180, 255, 255),   # color fallback azulado para distinguirlo
+        )
+
         self.bala_img = safe_load(
             os.path.join(base, "assets/sprites/purple_ball.png"),
             self.bullet_size,
@@ -194,7 +234,6 @@ class Juego:
             self.pantalla = pygame.display.set_mode((w, h), pygame.FULLSCREEN)
             self._apply_resolution(w, h, reset_positions=True)
         else:
-            # Volver a ventana fija BASE_W x BASE_H
             self.pantalla = pygame.display.set_mode((BASE_W, BASE_H), self._flags)
             self._apply_resolution(BASE_W, BASE_H, reset_positions=True)
         self._reset_estado_juego()
@@ -204,12 +243,15 @@ class Juego:
         self.jugador.x, self.jugador.y = self.margin, self.ground_y
         self.nave.x, self.nave.y = self.w - int(100 * self.scale), self.ground_y
         self.bala.x = self.w - self.margin
-        self.bala.y = self.ground_y + int(10 * self.scale)
+        self.bala.y = self.ground_y - self.player_height_normal // 2
         self.bala_disparada = False
         self.velocidad_bala = int(-10 * self.scale)
+        self.bala_altura_tipo = 0
         self.salto = False
         self.en_suelo = True
         self.salto_vel = self.salto_vel_inicial
+        self.agachado = False
+        self._restaurar_hitbox_normal()   # asegura tamaño correcto del Rect
         self._decision_frame_counter = 0
         self.fondo_x1 = 0
         self.fondo_x2 = self.w
@@ -220,98 +262,115 @@ class Juego:
         self.modelo_entrenado = False
         self.clase_unica = None
 
-    # ----------------- export / gráficas -----------------
 
+    def _restaurar_hitbox_normal(self) -> None:
+        """Ajusta el Rect del jugador a su tamaño de pie."""
+        self.jugador.height = self.player_height_normal
+        # El jugador siempre "pisa" el suelo desde su borde inferior.
+        self.jugador.y = self.ground_y
+
+    def _aplicar_hitbox_agachado(self) -> None:
+        """
+        Reduce la hitbox del jugador a la mitad de su altura.
+        Para que el personaje quede 'pegado al suelo' (no flote),
+        ajustamos Y de modo que el borde inferior siga en ground_y.
+        """
+        self.jugador.height = self.player_height_agachado
+        # Borde inferior = ground_y + player_height_normal  →  y = ground_y + diferencia
+        diferencia = self.player_height_normal - self.player_height_agachado
+        self.jugador.y = self.ground_y + diferencia
+
+    # ----------------- export / gráficas -----------------
     def exportar_datos_csv(self) -> str:
-        """
-        Exporta el contenido de self.datos_modelo a un CSV sencillo.
-        Devuelve un mensaje con la ruta del archivo o el motivo del fallo.
-        """
         if not self.datos_modelo:
             return "No hay datos para exportar."
-
         base = os.path.dirname(__file__)
         ruta = os.path.join(base, "datos_mlp.csv")
-
         try:
             with open(ruta, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["velocidad_bala", "distancia", "salto"])
+                # ---------------------------------------------------------------
+                # NUEVO: el CSV ahora incluye la columna altura_bala (0=baja, 1=alta).
+                # ---------------------------------------------------------------
+                writer.writerow(["velocidad_bala", "distancia", "altura_bala", "salto"])
                 for s in self.datos_modelo:
-                    writer.writerow([s.velocidad_bala, s.distancia, s.salto])
+                    writer.writerow([s.velocidad_bala, s.distancia, s.altura_bala, s.salto])
         except Exception as e:
             return f"Error al guardar CSV: {e}"
-
         return f"CSV guardado en datos_mlp.csv ({len(self.datos_modelo)} filas)."
 
     def graficar_datos_2d(self) -> str:
-        """
-        Grafica velocidad_bala vs distancia en 2D,
-        coloreando por salto (0 / 1).
-        Abre una ventana interactiva (desde el hilo principal, no bloqueante).
-        """
         if not self.datos_modelo:
             return "No hay datos para graficar."
-
         xs = [s.distancia for s in self.datos_modelo]
         ys = [s.velocidad_bala for s in self.datos_modelo]
-        cs = ["red" if s.salto == 1 else "blue" for s in self.datos_modelo]
+        colores = {0: "blue", 1: "red", 2: "green"}
+        cs = [colores.get(s.salto, "gray") for s in self.datos_modelo]
 
-        # Cerrar figura anterior si existe para evitar acumulación
         fig_num = plt.figure("Datos MLP - 2D", figsize=(8, 6)).number
         plt.figure(fig_num)
         plt.clf()
-        
         ax = plt.gca()
-        ax.scatter(xs, ys, c=cs, alpha=0.6, edgecolors="k", s=30)
+        # -----------------------------------------------------------------------
+        #  el tamaño del punto indica la altura de la bala:
+        #   punto grande (s=60) = bala alta  (tipo 1 → agacharse)
+        #   punto pequeño (s=20) = bala baja (tipo 0 → saltar)
+        # Esto permite ver visualmente cómo se distribuyen ambos tipos.
+        # -----------------------------------------------------------------------
+        sizes = [80 if s.altura_bala == 1 else 40 for s in self.datos_modelo]
+        ax.scatter(xs, ys, c=cs, alpha=0.6, edgecolors="k", s=sizes)
         ax.set_xlabel("Distancia jugador-bala")
         ax.set_ylabel("Velocidad bala")
-        ax.set_title("Datos entrenamiento MLP (rojo=salto, azul=no salto)")
+        ax.set_title("Datos MLP\nazul=quieto  rojo=salto  verde=agachado\npunto grande=bala alta  pequeño=bala baja")
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
-        # Mostrar sin bloquear (modo interactivo ya está activado con plt.ion())
         plt.show(block=False)
-        plt.draw()  # Forzar actualización de la ventana
-
-        return "Mostrando gráfica 2D interactiva (puedes rotar/zoom)."
+        plt.draw()
+        return "Mostrando gráfica 2D interactiva."
 
     def graficar_datos_3d(self) -> str:
-        """
-        Grafica velocidad_bala vs distancia vs índice de tiempo (frame) en 3D,
-        coloreando por salto (0 / 1).
-        Abre una ventana interactiva (desde el hilo principal, no bloqueante).
-        """
         if not self.datos_modelo:
             return "No hay datos para graficar."
-
         xs = [s.distancia for s in self.datos_modelo]
         ys = [s.velocidad_bala for s in self.datos_modelo]
-        zs = list(range(len(self.datos_modelo)))  # eje "tiempo" aproximado
-        cs = ["red" if s.salto == 1 else "blue" for s in self.datos_modelo]
+        zs = list(range(len(self.datos_modelo)))
+        colores = {0: "blue", 1: "red", 2: "green"}
+        cs = [colores.get(s.salto, "gray") for s in self.datos_modelo]
 
-        # Cerrar figura anterior si existe para evitar acumulación
         fig = plt.figure("Datos MLP - 3D", figsize=(8, 6))
         plt.clf()
-
-        # Crear eje 3D correctamente desde la figura
         ax = fig.add_subplot(111, projection="3d")
         ax.scatter(xs, ys, zs, c=cs, alpha=0.6, edgecolors="k", s=30)
         ax.set_xlabel("Distancia")
         ax.set_ylabel("Velocidad bala")
         ax.set_zlabel("Índice (tiempo aproximado)")
-        ax.set_title("Datos entrenamiento MLP 3D (rojo=salto, azul=no salto)")
+        ax.set_title("Datos MLP 3D (azul=quieto, rojo=salto, verde=agachado)")
         plt.tight_layout()
-        # Mostrar sin bloquear (modo interactivo ya está activado con plt.ion())
         plt.show(block=False)
-        plt.draw()  # Forzar actualización de la ventana
-
-        return "Mostrando gráfica 3D interactiva (puedes rotar/zoom)."
+        plt.draw()
+        return "Mostrando gráfica 3D interactiva."
 
     # ----------------- bala / salto -----------------
     def disparar_bala(self) -> None:
         if not self.bala_disparada:
-            # Aumentamos ligeramente el rango de velocidad para que el juego sea más rápido.
             self.velocidad_bala = int(random.randint(-12, -6) * self.scale)
+            self.bala_altura_tipo = random.randint(0, 1)
+
+            if self.bala_altura_tipo == 0:
+                # Bala BAJA: viaja a la altura de los pies/piernas del jugador.
+                # El jugador de pie la toca (borde inferior de su hitbox).
+                # Al SALTAR sube y la bala pasa por debajo.
+                # ground_y es la esquina superior del jugador, así que sus pies
+                # están en ground_y + player_height_normal. Ponemos la bala
+                # justo en la parte baja del personaje.
+                self.bala.y = self.ground_y + int(self.player_height_normal * 0.75)
+            else:
+                # Bala ALTA: viaja a la altura del torso/cabeza del jugador.
+                # El jugador de pie la toca (parte superior de su hitbox).
+                # Al AGACHARSE su hitbox se reduce a la mitad inferior,
+                # así la bala pasa por encima sin tocarlo.
+                self.bala.y = self.ground_y + int(self.player_height_normal * 0.1)
+
             self.bala_disparada = True
 
     def reset_bala(self) -> None:
@@ -319,7 +378,7 @@ class Juego:
         self.bala_disparada = False
 
     def iniciar_salto(self) -> None:
-        if self.en_suelo:
+        if self.en_suelo and not self.agachado:
             self.salto = True
             self.en_suelo = False
 
@@ -333,25 +392,57 @@ class Juego:
                 self.salto_vel = self.salto_vel_inicial
                 self.en_suelo = True
 
+    # -----------------------------------------------------------------------
+    # NUEVO: métodos para iniciar y terminar la acción de agacharse.
+    # -----------------------------------------------------------------------
+    def iniciar_agacharse(self) -> None:
+        """
+        Activa el estado agachado si el jugador está en el suelo y no está saltando.
+        Cambia la hitbox a la versión pequeña para que las balas altas pasen por encima.
+        """
+        if self.en_suelo and not self.salto:
+            self.agachado = True
+            self._aplicar_hitbox_agachado()
+
+    def terminar_agacharse(self) -> None:
+        """
+        Desactiva el estado agachado y restaura la hitbox normal del jugador.
+        Se llama cuando el jugador suelta la tecla de agacharse.
+        """
+        if self.agachado:
+            self.agachado = False
+            self._restaurar_hitbox_normal()
+
     # ----------------- datos / ML -----------------
     def registrar_decision_manual(self) -> None:
-        # IMPORTANTE: aquí NO debemos filtrar por en_suelo.
-        # En el mismo frame en que pulsas ESPACIO se llama a iniciar_salto(),
-        # que pone en_suelo = False antes de registrar, y se perdería ese frame.
-        # Solo comprobamos que la bala esté disparada.
         if not self.bala_disparada:
             return
         distancia = abs(self.jugador.x - self.bala.x)
-        # Entrenamos para que el modelo imite TU estilo:
-        # registramos desde que la bala sale, en cada frame relevante.
-        # Y marcamos salto = 1 DURANTE TODO EL TIEMPO QUE EL MUÑECO
-        # ESTÁ EN EL AIRE (no en_suelo).
-        salto_label = 0 if self.en_suelo else 1
+        # -----------------------------------------------------------------------
+        # La etiqueta tiene 3 clases:
+        #   0 = jugador en el suelo y de pie (quieto)
+        #   1 = jugador en el aire (saltando)
+        #   2 = jugador agachado
+        # -----------------------------------------------------------------------
+        if self.agachado:
+            salto_label = 2
+        elif not self.en_suelo:
+            salto_label = 1
+        else:
+            salto_label = 0
+
         self.datos_modelo.append(
             Sample(
                 velocidad_bala=float(self.velocidad_bala),
                 distancia=float(distancia),
                 salto=salto_label,
+                # ---------------------------------------------------------------
+                # NUEVO: guardamos también el tipo de altura de este disparo
+                # (0=baja, 1=alta) como feature extra para el modelo.
+                # Sin este dato el MLP no tiene forma de distinguir si una bala
+                # que viene a cierta distancia requiere saltar o agacharse.
+                # ---------------------------------------------------------------
+                altura_bala=self.bala_altura_tipo,
             )
         )
 
@@ -359,17 +450,22 @@ class Juego:
         samples = list(self.datos_modelo)
         if len(samples) < 80:
             return False, "Necesitas más datos (>= 80). Juega en MANUAL."
-        X = [[s.velocidad_bala, s.distancia] for s in samples]
+        # -----------------------------------------------------------------------
+        # NUEVO: ahora el vector de entrada tiene 3 features en lugar de 2:
+        #   [velocidad_bala, distancia, altura_bala]
+        # El tercer feature (altura_bala: 0=baja, 1=alta) es clave para que
+        # el modelo sepa qué acción tomar ante balas de distinto nivel.
+        # -----------------------------------------------------------------------
+        X = [[s.velocidad_bala, s.distancia, s.altura_bala] for s in samples]
         y = [s.salto for s in samples]
         clases = sorted(set(y))
-        # Si solo hay una clase, entrenamos un "modelo trivial"
-        # que siempre devuelve esa clase, en lugar de marcar error.
         if len(clases) < 2:
             self._reset_modelo()
             self.clase_unica = int(clases[0])
             self.modelo_entrenado = True
-            tipo = "SIEMPRE NO-SALTA (0)" if self.clase_unica == 0 else "SIEMPRE SALTA (1)"
-            return True, f"Modelo trivial entrenado: {tipo}. Junta datos de ambas clases para un modelo más fino."
+            nombres = {0: "QUIETO", 1: "SIEMPRE SALTA", 2: "SIEMPRE AGACHADO"}
+            tipo = nombres.get(self.clase_unica, str(self.clase_unica))
+            return True, f"Modelo trivial: {tipo}. Junta datos de varias clases."
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, random_state=42, stratify=y
         )
@@ -377,7 +473,7 @@ class Juego:
         X_train = scaler.fit_transform(X_train)
         X_test = scaler.transform(X_test)
         clf = MLPClassifier(
-            hidden_layer_sizes=(3, 3),
+            hidden_layer_sizes=(8, 8),   # un poco más grande para 3 clases
             activation="relu",
             solver="adam",
             max_iter=300000,
@@ -389,41 +485,44 @@ class Juego:
         self.scaler = scaler
         self.modelo = clf
         self.modelo_entrenado = True
-        return True, f"MLP entrenado. Accuracy test ≈ {acc:.3f}"
+        return True, f"MLP (3 clases) entrenado. Accuracy test ≈ {acc:.3f}"
 
-    def decision_auto_saltar(self) -> bool:
-        if not self.modelo_entrenado:
-            return False
-        if (not self.bala_disparada) or (not self.en_suelo):
-            return False
-        distancia = abs(self.jugador.x - self.bala.x)
-        # En modo AUTO evaluamos desde que la bala sale,
-        # para que el modelo también aprenda a "no hacer nada"
-        # cuando la bala aún está lejos.
+    def decision_auto(self) -> int:
+        """
+        Consulta el modelo y devuelve la acción recomendada:
+          0 = no hacer nada
+          1 = saltar
+          2 = agacharse
+        Si no hay modelo, devuelve 0 (quieto).
+        """
+        if not self.modelo_entrenado or not self.bala_disparada:
+            return 0
 
         # Caso especial: modelo trivial de una sola clase
         if self.clase_unica is not None and self.modelo is None:
-            proba_salto = 1.0 if self.clase_unica == 1 else 0.0
-            self.ultima_proba_salto = proba_salto
-            return self.clase_unica == 1
+            return self.clase_unica
 
-        # Caso normal: modelo MLP con scaler
         if self.modelo is None or self.scaler is None:
-            return False
+            return 0
 
-        X = [[float(self.velocidad_bala), float(distancia)]]
+        distancia = abs(self.jugador.x - self.bala.x)
+        X = [[float(self.velocidad_bala), float(distancia), float(self.bala_altura_tipo)]]
         Xs = self.scaler.transform(X)
-        proba_salto = None
+        pred = int(self.modelo.predict(Xs)[0])
+
+        # Guardamos la probabilidad de salto para mostrarla en pantalla
         if hasattr(self.modelo, "predict_proba"):
-            proba_salto = float(self.modelo.predict_proba(Xs)[0][1])
-            decision = proba_salto >= 0.5
-        else:
-            pred = int(self.modelo.predict(Xs)[0])
-            proba_salto = 1.0 if pred == 1 else 0.0
-            decision = pred == 1
-        # Guardamos la última probabilidad para mostrarla en pantalla.
-        self.ultima_proba_salto = proba_salto
-        return decision
+            probas = self.modelo.predict_proba(Xs)[0]
+            # Las clases pueden estar en orden variable; buscamos la clase 1 (salto)
+            clases_lista = list(self.modelo.classes_)
+            idx_salto = clases_lista.index(1) if 1 in clases_lista else None
+            self.ultima_proba_salto = float(probas[idx_salto]) if idx_salto is not None else None
+
+        self.ultima_accion_auto = pred
+        return pred
+    
+    def decision_auto_saltar(self) -> bool:
+        return self.decision_auto() == 1
 
     # ----------------- menú -----------------
     def _dibujar_menu(self, msg: str = "") -> None:
@@ -438,7 +537,12 @@ class Juego:
             "C - Exportar datos a CSV",
             "F - Fullscreen (toggle)",
             "Q - Salir",
+            "",
+            "Controles en juego:",
+            "  ESPACIO  → saltar",
+            "  ABAJO (↓) → agacharse (mantener pulsado)",
         ]
+
         x0 = int(80 * self.scale)
         y = int(140 * self.scale)
         line_h = self.fuente.get_linesize()
@@ -451,7 +555,7 @@ class Juego:
         y += int(8 * self.scale)
         estado = [
             f"Memoria: {len(self.datos_modelo)} | Modelo: {'sí' if self.modelo_entrenado else 'no'}",
-            f"Resolución: {self.w}x{self.h} | scale≈{self.scale:.2f} | ventana_decisión≈{self.decision_window}",
+            f"Resolución: {self.w}x{self.h} | scale≈{self.scale:.2f}",
         ]
         for line in estado:
             t = self.fuente_chica.render(line, True, self.GRIS)
@@ -475,8 +579,6 @@ class Juego:
                     self.corriendo = False
                     esperando = False
                     break
-                # Ya no reaccionamos a cambios de tamaño de ventana,
-                # la ventana es fija.
                 if e.type == pygame.KEYDOWN:
                     if e.key == pygame.K_m:
                         self.modo_auto = False
@@ -520,8 +622,15 @@ class Juego:
         if self.frame_count >= self.frame_speed:
             self.current_frame = (self.current_frame + 1) % len(self.jugador_frames)
             self.frame_count = 0
+        if self.agachado:
+            # Dibujamos en la posición Y actual del Rect (ya ajustada por _aplicar_hitbox_agachado)
+            self.pantalla.blit(self.jugador_agachado_img, (self.jugador.x, self.jugador.y))
+        else:
+            self.pantalla.blit(
+                self.jugador_frames[self.current_frame],
+                (self.jugador.x, self.jugador.y)
+            )
 
-        self.pantalla.blit(self.jugador_frames[self.current_frame], (self.jugador.x, self.jugador.y))
         self.pantalla.blit(self.nave_img, (self.nave.x, self.nave.y))
 
         if self.bala_disparada:
@@ -530,54 +639,73 @@ class Juego:
             self.reset_bala()
         self.pantalla.blit(self.bala_img, (self.bala.x, self.bala.y))
 
-        # Si hay colisión, solo reiniciamos el estado del juego
-        # pero NO volvemos al menú para evitar el efecto de
-        # "se cierra y se abre" constantemente.
         if self.jugador.colliderect(self.bala):
+            self.agachado = False
             self._reset_estado_juego()
 
-        # Info del modelo en tiempo real (solo si hay modelo entrenado)
-        if self.modelo_entrenado and self.modo_auto and self.ultima_proba_salto is not None:
-            txt = self.fuente_chica.render(
-                f"proba_salto≈{self.ultima_proba_salto:.2f}", True, self.AMARILLO
-            )
-            # Esquina superior izquierda, con un pequeño margen.
-            self.pantalla.blit(txt, (10, 10))
+        # Info del modelo en tiempo real
+        if self.modelo_entrenado and self.modo_auto:
+            lineas_info = []
+            if self.ultima_proba_salto is not None:
+                lineas_info.append(f"proba_salto≈{self.ultima_proba_salto:.2f}")
+            nombres_accion = {0: "quieto", 1: "salta", 2: "agacha"}
+            if self.ultima_accion_auto is not None:
+                lineas_info.append(f"accion={nombres_accion.get(self.ultima_accion_auto, '?')}")
+            for i, linea in enumerate(lineas_info):
+                txt = self.fuente_chica.render(linea, True, self.AMARILLO)
+                self.pantalla.blit(txt, (10, 10 + i * self.fuente_chica.get_linesize()))
+        if self.bala_disparada:
+            if self.bala_altura_tipo == 1:
+                hint_txt = self.fuente_chica.render("↑ AGÁCHATE", True, (255, 160, 60))
+            else:
+                hint_txt = self.fuente_chica.render("↓ SALTA", True, (60, 220, 255))
+            # Centramos el texto en la parte superior de la pantalla
+            hint_x = self.w // 2 - hint_txt.get_width() // 2
+            self.pantalla.blit(hint_txt, (hint_x, int(12 * self.scale)))
 
     def loop(self) -> None:
         reloj = pygame.time.Clock()
         self.mostrar_menu()
 
         while self.corriendo:
-            salto_frame = False
-
             for e in pygame.event.get():
                 if e.type == pygame.QUIT:
                     self.corriendo = False
-                # La ventana es de tamaño fijo: ignoramos eventos VIDEORESIZE.
                 elif e.type == pygame.KEYDOWN:
                     if e.key == pygame.K_q:
                         self.corriendo = False
                     elif e.key in (pygame.K_ESCAPE, pygame.K_p):
-                        # Reiniciamos el estado del juego (incluida la bala)
-                        # y volvemos al menú.
+                        self.agachado = False          # limpiamos estado al salir
                         self._reset_estado_juego()
                         self.mostrar_menu()
                     elif e.key == pygame.K_f:
                         self._toggle_fullscreen()
-                    elif e.key == pygame.K_SPACE and (not self.modo_auto) and self.en_suelo:
-                        salto_frame = True
+                    elif e.key == pygame.K_SPACE and not self.modo_auto and self.en_suelo:
                         self.iniciar_salto()
+
+                    elif e.key == pygame.K_DOWN and not self.modo_auto:
+                        self.iniciar_agacharse()
+
+                elif e.type == pygame.KEYUP:
+                    if e.key == pygame.K_DOWN and not self.modo_auto:
+                        self.terminar_agacharse()
 
             if not self.corriendo:
                 break
 
             if self.modo_auto:
-                if self.decision_auto_saltar():
+                accion = self.decision_auto()
+                if accion == 1:
+                    # El modelo dice: saltar
+                    self.terminar_agacharse()   # por si estaba agachado
                     self.iniciar_salto()
+                elif accion == 2:
+                    # El modelo dice: agacharse
+                    self.iniciar_agacharse()
+                else:
+                    # El modelo dice: no hacer nada → de pie
+                    self.terminar_agacharse()
             else:
-                # En modo manual registramos SIEMPRE la decisión de este frame.
-                # Ahora la etiqueta salto=1 cubre TODO el tiempo en el aire.
                 self.registrar_decision_manual()
 
             if self.salto:
@@ -588,7 +716,6 @@ class Juego:
 
             self._update_frame()
             pygame.display.flip()
-            # Aumentamos FPS para que todo el juego se sienta más rápido.
             reloj.tick(45)
 
         pygame.quit()
@@ -600,4 +727,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
