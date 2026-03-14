@@ -31,20 +31,9 @@ EXTRA_SCALE = 1.1
 class Sample:
     velocidad_bala: float
     distancia: float
-    # ---------------------------------------------------------------------------
-    # La etiqueta tiene 3 valores posibles:
-    #   0 = no hacer nada (pararse normal)
-    #   1 = saltar
-    #   2 = agacharse
-    # ---------------------------------------------------------------------------
+
     salto: int
-    # ---------------------------------------------------------------------------
-    # NUEVO: altura de la bala en este disparo.
-    #   0 = bala baja  → hay que SALTAR para esquivarla
-    #   1 = bala alta  → hay que AGACHARSE para esquivarla
-    # Se incluye como feature extra para que el modelo pueda distinguir
-    # qué acción tomar según la trayectoria de la bala actual.
-    # ---------------------------------------------------------------------------
+
     altura_bala: int
 
 
@@ -122,12 +111,6 @@ class Juego:
         self.fondo_x1 = 0
         self.fondo_x2 = start_w
 
-        # -----------------------------------------------------------------------
-        # NUEVO: tipo de altura del disparo actual.
-        #   0 = bala baja  (viaja al nivel de los pies → hay que saltar)
-        #   1 = bala alta  (viaja al nivel del torso  → hay que agacharse)
-        # Se sortea aleatoriamente en cada disparo dentro de disparar_bala().
-        # -----------------------------------------------------------------------
         self.bala_altura_tipo: int = 0
 
         self._apply_resolution(start_w, start_h, reset_positions=True)
@@ -317,7 +300,7 @@ class Juego:
         #   punto pequeño (s=20) = bala baja (tipo 0 → saltar)
         # Esto permite ver visualmente cómo se distribuyen ambos tipos.
         # -----------------------------------------------------------------------
-        sizes = [80 if s.altura_bala == 1 else 40 for s in self.datos_modelo]
+        sizes = [80 if s.altura_bala == 1 else 20 for s in self.datos_modelo]
         ax.scatter(xs, ys, c=cs, alpha=0.6, edgecolors="k", s=sizes)
         ax.set_xlabel("Distancia jugador-bala")
         ax.set_ylabel("Velocidad bala")
@@ -369,7 +352,7 @@ class Juego:
                 # El jugador de pie la toca (parte superior de su hitbox).
                 # Al AGACHARSE su hitbox se reduce a la mitad inferior,
                 # así la bala pasa por encima sin tocarlo.
-                self.bala.y = self.ground_y + int(self.player_height_normal * 0.1)
+                self.bala.y = self.ground_y + int(self.player_height_normal * 0.05)
 
             self.bala_disparada = True
 
