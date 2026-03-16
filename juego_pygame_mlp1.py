@@ -346,7 +346,7 @@ class Juego:
                 # ground_y es la esquina superior del jugador, así que sus pies
                 # están en ground_y + player_height_normal. Ponemos la bala
                 # justo en la parte baja del personaje.
-                self.bala.y = self.ground_y + int(self.player_height_normal * 0.75)
+                self.bala.y = self.ground_y + int(self.player_height_normal * 0.45)
             else:
                 # Bala ALTA: viaja a la altura del torso/cabeza del jugador.
                 # El jugador de pie la toca (parte superior de su hitbox).
