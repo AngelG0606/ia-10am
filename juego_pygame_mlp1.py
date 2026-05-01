@@ -231,7 +231,16 @@ class Juego:
 
         self._reset_estado_juego()
 
+    def _procesar_fin_bala(self) -> None:
+        if getattr(self, "pulsaciones_bala_actual", 0) > 1:
+            inicio = getattr(self, "indice_inicio_bala_actual", 0)
+            if hasattr(self, "datos_modelo"):
+                for i in range(inicio, len(self.datos_modelo)):
+                    if self.datos_modelo[i].salto == 2:
+                        self.datos_modelo[i].salto = 3
+
     def _reset_estado_juego(self) -> None:
+        self._procesar_fin_bala()
         self.jugador.x, self.jugador.y = self.margin, self.ground_y
         self.nave.x, self.nave.y = self.w - int(100 * self.scale), self.ground_y
         self.bala.x = self.w - self.margin
@@ -261,6 +270,10 @@ class Juego:
 
         self.fondo_x1 = 0
         self.fondo_x2 = self.w
+        
+        self.indice_inicio_bala_actual = len(self.datos_modelo) if hasattr(self, "datos_modelo") else 0
+        self.pulsaciones_bala_actual = 0
+        self.tecla_abajo_anterior = False
 
     def _reset_modelo(self) -> None:
         self.modelo = None
@@ -342,8 +355,11 @@ class Juego:
 
             self.bala_altura_feature = float(self.bala.y)
             self.bala_disparada = True
+            self.indice_inicio_bala_actual = len(self.datos_modelo) if hasattr(self, "datos_modelo") else 0
+            self.pulsaciones_bala_actual = 0
 
     def reset_bala(self) -> None:
+        self._procesar_fin_bala()
         self.bala.x = self.w - self.margin
         self.bala_disparada = False
         self.frames_bala_actual = 0
@@ -456,6 +472,10 @@ class Juego:
         teclas = pygame.key.get_pressed()
         abajo_presionado = teclas[pygame.K_DOWN]
 
+        if abajo_presionado and not getattr(self, "tecla_abajo_anterior", False):
+            self.pulsaciones_bala_actual = getattr(self, "pulsaciones_bala_actual", 0) + 1
+        self.tecla_abajo_anterior = abajo_presionado
+
         self.tecla_abajo_presionada = abajo_presionado
 
         if abajo_presionado and self.en_suelo and not self.salto:
@@ -475,10 +495,7 @@ class Juego:
         distancia = abs(self.jugador.x - self.bala.x)
 
         if self.tecla_abajo_presionada and self.en_suelo and not self.salto:
-            if self.bala_altura_tipo == 3:
-                salto_label = 3
-            else:
-                salto_label = 2
+            salto_label = 2
         elif not self.en_suelo:
             salto_label = 1
         else:
@@ -513,7 +530,14 @@ class Juego:
         grupos = {}
 
         for xi, yi in zip(X, y):
-            tipo_bala = int(xi[4])
+            tipo_bala = 0
+            if len(xi) > 5:
+                if xi[5] == 1.0: tipo_bala = 1
+                elif xi[6] == 1.0: tipo_bala = 2
+                elif xi[7] == 1.0: tipo_bala = 3
+            else:
+                tipo_bala = int(xi[4])
+                
             clave = (tipo_bala, yi)
             grupos.setdefault(clave, []).append((xi, yi))
 
@@ -548,10 +572,10 @@ class Juego:
                 s.distancia,
                 s.altura_bala,
                 s.frame_bala,
-                s.tipo_bala,
-                s.frames_agachado_actual,
-                s.frames_quieto_actual,
-                s.frames_desde_ultimo_agachado,
+                1.0 if s.tipo_bala == 0 else 0.0,
+                1.0 if s.tipo_bala == 1 else 0.0,
+                1.0 if s.tipo_bala == 2 else 0.0,
+                1.0 if s.tipo_bala == 3 else 0.0,
             ]
             for s in samples
         ]
@@ -638,10 +662,10 @@ class Juego:
             float(distancia),
             float(self.bala_altura_feature),
             float(self.frames_bala_actual),
-            float(self.bala_altura_tipo),
-            float(self.frames_agachado_actual),
-            float(self.frames_quieto_actual),
-            float(self.frames_desde_ultimo_agachado),
+            1.0 if self.bala_altura_tipo == 0 else 0.0,
+            1.0 if self.bala_altura_tipo == 1 else 0.0,
+            1.0 if self.bala_altura_tipo == 2 else 0.0,
+            1.0 if self.bala_altura_tipo == 3 else 0.0,
         ]]
 
         Xs = self.scaler.transform(X)
@@ -658,9 +682,8 @@ class Juego:
             self.ultima_proba_agacharse = float(probas[idx_agacharse]) if idx_agacharse is not None else None
 
         self.ultima_accion_auto = pred
-        accion_corregida = self.corregir_accion_por_tipo_bala(pred)
-        self.ultima_accion_corregida_auto = accion_corregida
-        return accion_corregida
+        self.ultima_accion_corregida_auto = pred
+        return pred
 
     def _dibujar_menu(self, msg: str = "") -> None:
         self.pantalla.fill(self.NEGRO)
@@ -920,3 +943,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+#funciona 4
