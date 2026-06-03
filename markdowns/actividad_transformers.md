@@ -197,4 +197,4 @@ En traducción:
 
 En chatbots sucede algo parecido:
 - el mensaje del usuario se interpreta,
-- la respuesta se genera token por token.
+- la respuesta se genera token por token.//

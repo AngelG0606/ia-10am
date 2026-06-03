@@ -1,0 +1,22 @@
+{
+  "name": "rnn-flask-autocomplete",
+  "displayName": "JORGE RNN,
+  "version": "1.0.0",
+  "publisher": "Angel",
+  "engines": { "vscode": "^1.80.0" },
+  "main": "./extension.js",
+  "activationEvents": ["onLanguage:c", "onLanguage:cpp"],
+  "contributes": {
+    "commands": [
+      { "command": "rnnKeras.complete", "title": "RNN: Autocompletar Linea actual" },
+      { "command": "rnnKeras.suggest", "title": "RNN: Desplegar Panel de Sugerencias" }
+    ],
+    "keybindings": [
+      {
+        "command": "rnnKeras.complete",
+        "key": "tab",
+        "when": "editorTextFocus && (editorLangId == c || editorLangId == cpp)"
+      }
+    ]
+  }
+}
