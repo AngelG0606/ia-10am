@@ -422,6 +422,12 @@ class Juego:
         """
         if not self.bala_disparada:
             return
+            
+        # Evitar registrar datos basura cuando la bala ya pasó al jugador.
+        # Esto previene que el modelo asocie "distancia negativa" con "saltar".
+        if self.bala.right < self.jugador.left:
+            return
+
         distancia = self.distancia_bala_jugador()
         if not self.en_suelo and self.salto:
             accion = 1
@@ -499,6 +505,11 @@ class Juego:
             return 0
         if not self.bala_disparada:
             return 0
+            
+        # Si la bala ya nos pasó completamente, la ignoramos y no hacemos nada
+        if self.bala.right < self.jugador.left:
+            return 0
+            
         distancia = self.distancia_bala_jugador()
 
         # Caso especial: modelo trivial de una sola clase
